@@ -33,7 +33,10 @@ public class MotionReceiverMulti : MonoBehaviour
     public MappingPreset preset = MappingPreset.PresetA;
 
     [Header("Fixes")]
-    public bool flipFrontBack = true; // ✅ turn this on to fix forward/back reversed
+    public bool flipFrontBack = true;
+
+    [Header("Debug")]
+    public bool verboseLogs = true;
 
     public enum MappingPreset
     {
@@ -52,15 +55,33 @@ public class MotionReceiverMulti : MonoBehaviour
     private Thread thread;
     private volatile bool running;
 
+    // debug stats
+    private int pktCount = 0;
+    private float lastStatTime = 0f;
+    private string lastSender = "";
+    private int lastSlot = -999;
+    private string lastDevice = "";
+
     void Start()
     {
-        udp = new UdpClient(listenPort);
-        udp.Client.ReceiveTimeout = 1000;
+        try
+        {
+            udp = new UdpClient(listenPort);
+            udp.Client.ReceiveTimeout = 1000;
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[MotionReceiverMulti] FAILED to bind UDP port {listenPort}. " +
+                           $"Is the port in use? Error: {e.Message}");
+            enabled = false;
+            return;
+        }
 
         running = true;
         thread = new Thread(ReceiveLoop) { IsBackground = true };
         thread.Start();
 
+        lastStatTime = Time.realtimeSinceStartup;
         Debug.Log($"[MotionReceiverMulti] Listening UDP on port {listenPort}");
     }
 
@@ -73,6 +94,18 @@ public class MotionReceiverMulti : MonoBehaviour
 
     void Update()
     {
+        // packet rate logging
+        float now = Time.realtimeSinceStartup;
+        if (now - lastStatTime >= 1.0f)
+        {
+            if (pktCount > 0 || verboseLogs)
+            {
+                Debug.Log($"[MotionReceiverMulti] ~{pktCount} pkt/s | lastSender={lastSender} | lastSlot={lastSlot} | lastDevice={lastDevice}");
+            }
+            pktCount = 0;
+            lastStatTime = now;
+        }
+
         if (racketP1 != null && hasP1)
         {
             MotionPacketData p;
@@ -99,7 +132,6 @@ public class MotionReceiverMulti : MonoBehaviour
     {
         Quaternion raw = new Quaternion((float)p.qx, (float)p.qy, (float)p.qz, (float)p.qw);
 
-        // 1) Base mapping (KEEP what already makes L/R correct)
         Quaternion mapped;
         switch (preset)
         {
@@ -117,12 +149,8 @@ public class MotionReceiverMulti : MonoBehaviour
                 break;
         }
 
-        // 2) Fix front/back reversed by flipping "forward" (yaw 180)
-        // Multiply on the left to rotate the whole frame.
         if (flipFrontBack)
-        {
             mapped = Quaternion.Euler(0f, 180f, 0f) * mapped;
-        }
 
         return mapped;
     }
@@ -138,8 +166,46 @@ public class MotionReceiverMulti : MonoBehaviour
                 byte[] data = udp.Receive(ref any);
                 string json = Encoding.UTF8.GetString(data);
 
-                MotionPacketData p = JsonUtility.FromJson<MotionPacketData>(json);
-                if (p == null || string.IsNullOrEmpty(p.deviceId)) continue;
+                // debug sender
+                lastSender = $"{any.Address}:{any.Port}";
+                pktCount++;
+
+                MotionPacketData p;
+                try
+                {
+                    p = JsonUtility.FromJson<MotionPacketData>(json);
+                }
+                catch (Exception je)
+                {
+                    if (verboseLogs)
+                        Debug.LogWarning($"[MotionReceiverMulti] JSON parse failed: {je.Message} | raw={json}");
+                    continue;
+                }
+
+                if (p == null)
+                {
+                    if (verboseLogs)
+                        Debug.LogWarning($"[MotionReceiverMulti] Parsed null packet | raw={json}");
+                    continue;
+                }
+
+                lastSlot = p.playerSlot;
+                lastDevice = p.deviceId ?? "";
+
+                if (string.IsNullOrEmpty(p.deviceId))
+                {
+                    if (verboseLogs)
+                        Debug.LogWarning($"[MotionReceiverMulti] Missing deviceId | slot={p.playerSlot} | raw={json}");
+                    continue;
+                }
+
+                // IMPORTANT: if playerSlot isn't 1 or 2, nothing will move.
+                if (p.playerSlot != 1 && p.playerSlot != 2)
+                {
+                    if (verboseLogs)
+                        Debug.LogWarning($"[MotionReceiverMulti] playerSlot={p.playerSlot} (expected 1 or 2). Nothing will update.");
+                    continue;
+                }
 
                 lock (locker)
                 {
@@ -148,7 +214,7 @@ public class MotionReceiverMulti : MonoBehaviour
                         latestP1 = p;
                         hasP1 = true;
                     }
-                    else if (p.playerSlot == 2)
+                    else
                     {
                         latestP2 = p;
                         hasP2 = true;
@@ -157,7 +223,12 @@ public class MotionReceiverMulti : MonoBehaviour
             }
             catch (SocketException)
             {
-                // timeout, ignore
+                // timeout
+            }
+            catch (ObjectDisposedException)
+            {
+                // closing
+                break;
             }
             catch (Exception e)
             {
