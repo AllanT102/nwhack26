@@ -45,6 +45,9 @@ public class MotionReceiverMulti : MonoBehaviour
         PresetC, // flip X
     }
 
+    private Vector3 lastPosition;
+    public Vector3 CurrentVelocity { get; private set; }
+
     private readonly object locker = new object();
     private MotionPacketData latestP1;
     private MotionPacketData latestP2;
@@ -119,6 +122,13 @@ public class MotionReceiverMulti : MonoBehaviour
             lock (locker) { p = latestP2; }
             ApplyRotation(racketP2, p);
         }
+    }
+
+    void FixedUpdate() 
+    {
+        // Calculate velocity manually since we are moving via script
+        CurrentVelocity = (racketP1.position - lastPosition) / Time.fixedDeltaTime;
+        lastPosition = racketP1.position;
     }
 
     private void ApplyRotation(Transform target, MotionPacketData p)
