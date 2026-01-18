@@ -57,6 +57,7 @@ public class MotionReceiverMulti : MonoBehaviour
     private UdpClient udp;
     private Thread thread;
     private volatile bool running;
+    private Rigidbody rb;
 
     // debug stats
     private int pktCount = 0;
@@ -135,7 +136,13 @@ public class MotionReceiverMulti : MonoBehaviour
     {
         Quaternion q = MapQuaternion(p);
         float alpha = 1f - Mathf.Pow(1f - rotationLerp, Time.deltaTime * 60f);
-        target.rotation = Quaternion.Slerp(target.rotation, q, alpha);
+        Quaternion newRotation = Quaternion.Slerp(target.rotation, q, alpha);
+        
+        if (rb == null) rb = target.GetComponent<Rigidbody>();
+        if (rb != null)
+            rb.MoveRotation(newRotation);
+        else
+            target.rotation = newRotation;
     }
 
     private Quaternion MapQuaternion(MotionPacketData p)
